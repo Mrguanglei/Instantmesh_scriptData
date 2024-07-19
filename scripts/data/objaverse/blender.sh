@@ -4,7 +4,7 @@
 start_time=$(date +%s)
 start_date=$(date)
 
-DIRECTORY="/home/mrguanglei/3D/OpenLRM/train"
+DIRECTORY="/your/path/OpenLRM/data"     # data absolute path
 for glb_file in $DIRECTORY/*.glb; do
   echo "Processing $glb_file"
   blender -b -noaudio  -P blender_script.py -- --object_path $glb_file
