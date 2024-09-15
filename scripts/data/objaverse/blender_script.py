@@ -2,6 +2,7 @@ import argparse
 import math
 import os
 import random
+import shutil
 import sys
 import time
 import urllib.request
@@ -22,6 +23,7 @@ parser.add_argument(
 )
 parser.add_argument("--num_images", type=int, default=32)
 parser.add_argument("--resolution", type=int, default=1024)
+parser.add_argument("--gpu_id", type=int, default=0)
 
 if "--" in sys.argv:
     argv = sys.argv[sys.argv.index("--") + 1:]
@@ -56,39 +58,7 @@ cycles_preferences = bpy.context.preferences.addons["cycles"].preferences
 cycles_preferences.compute_device_type = "CUDA"
 cuda_devices = cycles_preferences.get_devices_for_type("CUDA")
 for device in cuda_devices:
-    device.use = True
-
-
-def setup_compositor_nodes():
-    bpy.context.scene.use_nodes = True
-    tree = bpy.context.scene.node_tree
-    links = tree.links
-
-    for n in tree.nodes:
-        tree.nodes.remove(n)
-
-    rl = tree.nodes.new(type='CompositorNodeRLayers')
-    composite = tree.nodes.new(type='CompositorNodeComposite')
-    links.new(rl.outputs['Image'], composite.inputs['Image'])
-
-    # 设置深度节点
-    depth = tree.nodes.new(type="CompositorNodeMapValue")
-    depth.offset = [-0.7]
-    depth.size = [0.7]
-    depth.use_min = True
-    depth.min = [0]
-    depth.use_max = True
-    depth.max = [255]
-    links.new(rl.outputs['Depth'], depth.inputs[0])
-
-    depth_out = tree.nodes.new(type="CompositorNodeComposite")
-    links.new(depth.outputs[0], depth_out.inputs[0])
-
-    # 设置法线节点
-    normal = tree.nodes.new(type="CompositorNodeNormalize")
-    links.new(rl.outputs['Normal'], normal.inputs[0])
-    normal_out = tree.nodes.new(type="CompositorNodeComposite")
-    links.new(normal.outputs[0], normal_out.inputs[0])
+    device.use = False
 
 
 def compose_RT(R, T):
@@ -211,18 +181,18 @@ def normalize_scene(box_scale: float):
         obj.matrix_world.translation += offset
     bpy.ops.object.select_all(action="DESELECT")
 
-
 def setup_camera():
     cam = scene.objects["Camera"]
     cam.location = (0, 1.2, 0)
     cam.data.lens = 24
     cam.data.sensor_width = 32
     cam.data.sensor_height = 32
+    cam.data.clip_start = 0.01
+    cam.data.clip_end = 6.0
     cam_constraint = cam.constraints.new(type="TRACK_TO")
     cam_constraint.track_axis = "TRACK_NEGATIVE_Z"
     cam_constraint.up_axis = "UP_Y"
     return cam, cam_constraint
-
 
 def save_images(object_file: str) -> None:
     os.makedirs(args.output_dir, exist_ok=True)
@@ -243,42 +213,95 @@ def save_images(object_file: str) -> None:
     # Prepare to save camera parameters
     cam_params = {
         "intrinsics": get_calibration_matrix_K_from_blender(camera.data, return_principles=True),
-        "poses": []
+        "cam_poses": [],
+        "cam_poses_w2c": []
     }
 
-    setup_compositor_nodes()
+    bpy.context.scene.use_nodes = True
+    tree = bpy.context.scene.node_tree
+    links = tree.links
+
+    for n in tree.nodes:
+        tree.nodes.remove(n)
+
+    bpy.context.view_layer.use_pass_normal = True
+    bpy.context.view_layer.use_pass_z = True
+    rl = tree.nodes.new(type='CompositorNodeRLayers')
+
+    # Save images
+    image_save = tree.nodes.new(type='CompositorNodeOutputFile')
+    links.new(rl.outputs['Image'], image_save.inputs['Image'])
+
+    # Save depth maps as png and exr
+    depth_map = tree.nodes.new(type="CompositorNodeMapRange")
+    depth_map.inputs['From Min'].default_value = 0.01
+    depth_map.inputs['From Max'].default_value = 6.0
+    depth_map.inputs['To Min'].default_value = 0.0
+    depth_map.inputs['To Max'].default_value = 1.0
+    links.new(rl.outputs['Depth'], depth_map.inputs['Value'])
+    depth_save = tree.nodes.new(type="CompositorNodeOutputFile")
+    links.new(depth_map.outputs[0], depth_save.inputs['Image'])
+
+    depth_save_exr = tree.nodes.new(type="CompositorNodeOutputFile")
+    links.new(rl.outputs['Depth'], depth_save_exr.inputs['Image'])
+
+    # Save normals
+    normal_save = tree.nodes.new(type="CompositorNodeOutputFile")
+    links.new(rl.outputs['Normal'], normal_save.inputs['Image'])
 
     for i in range(args.num_images):
+        image_save.base_path = img_dir
+        image_save.file_slots[0].use_node_format = True
+        image_save.file_slots[0].path = f"{i:03d}"
+        image_save.format.file_format = 'PNG'
+        image_save.format.color_mode = 'RGBA'
+
+        depth_save.base_path = img_dir
+        depth_save.file_slots[0].use_node_format = True
+        depth_save.file_slots[0].path = f"{i:03d}_depth"
+        depth_save.format.file_format = 'PNG'
+        depth_save.format.color_mode = 'BW'
+        depth_save.format.color_depth = '8'
+
+        depth_save_exr.base_path = img_dir
+        depth_save_exr.file_slots[0].use_node_format = True
+        depth_save_exr.file_slots[0].path = f"{i:03d}_depth"
+        depth_save_exr.format.file_format = 'OPEN_EXR'
+        depth_save_exr.format.color_depth = '32'
+
+        normal_save.base_path = img_dir
+        normal_save.file_slots[0].use_node_format = True
+        normal_save.file_slots[0].path = f"{i:03d}_normal"
+        normal_save.format.file_format = 'PNG'
+        normal_save.format.color_mode = 'RGBA'
+
         # Set the camera position
         camera_option = 'random' if i > 0 else 'front'
         camera = set_camera_location(camera, option=camera_option)
-
-        # Render the color image
-        render_path = os.path.join(img_dir, f"{i:03d}.png")
-        scene.render.filepath = render_path
         bpy.ops.render.render(write_still=True)
 
         # Save camera RT matrix (C2W)
         location, rotation = camera.matrix_world.decompose()[0:2]
         RT = compose_RT(rotation.to_matrix(), np.array(location))
-        cam_params["poses"].append(RT)
+        cam_params["cam_poses"].append(RT)
 
-        # Render the normal image
-        bpy.context.scene.view_layers["View Layer"].use_pass_normal = True
-        normal_path = os.path.join(img_dir, f"{i:03d}_normal.png")
-        scene.render.filepath = normal_path
-        bpy.ops.render.render(write_still=True)
-        bpy.context.scene.view_layers["View Layer"].use_pass_normal = False
+        # Save camera RT matrix (W2C)
+        RT_2 = get_3x4_RT_matrix_from_blender(camera)
+        cam_params["cam_poses_w2c"].append(RT_2)
 
-        # Render the depth image
-        bpy.context.scene.view_layers["View Layer"].use_pass_z = True
-        depth_path = os.path.join(img_dir, f"{i:03d}_depth.png")
-        scene.render.filepath = depth_path
-        bpy.ops.render.render(write_still=True)
-        bpy.context.scene.view_layers["View Layer"].use_pass_z = False
+    for file_name in os.listdir(img_dir):
+        if os.path.isfile(os.path.join(img_dir, file_name)):
+            name, extension = os.path.splitext(file_name)
+            new_name = name[:-4]
+            new_filename = new_name + extension
+
+            print(name, extension, new_name, new_filename)
+            old_filepath = os.path.join(img_dir, file_name)
+            new_filepath = os.path.join(img_dir, new_filename)
+            shutil.move(old_filepath, new_filepath)
 
     # Save camera intrinsics and poses
-    np.savez(os.path.join(img_dir, 'camera.npz'), **cam_params)
+    np.savez(os.path.join(img_dir, 'cameras.npz'), **cam_params)
 
 
 def download_object(object_url: str) -> str:
@@ -291,6 +314,20 @@ def download_object(object_url: str) -> str:
     local_path = os.path.abspath(local_path)
     return local_path
 
+def get_3x4_RT_matrix_from_blender(cam):
+    bpy.context.view_layer.update()
+    location, rotation = cam.matrix_world.decompose()[0:2]
+    R = np.asarray(rotation.to_matrix())
+    t = np.asarray(location)
+
+    cam_rec = np.asarray([[1, 0, 0], [0, -1, 0], [0, 0, -1]], np.float32)
+    R = R.T
+    t = -R @ t
+    R_world2cv = cam_rec @ R
+    t_world2cv = cam_rec @ t
+
+    RT = np.concatenate([R_world2cv,t_world2cv[:,None]],1)
+    return RT
 
 def get_calibration_matrix_K_from_blender(camera, return_principles=False):
     render = bpy.context.scene.render
@@ -315,19 +352,13 @@ def get_calibration_matrix_K_from_blender(camera, return_principles=False):
     else:
         return K
 
-
 def main(args):
     try:
         start_i = time.time()
-        if args.object_path.startswith("http"):
-            local_path = download_object(args.object_path)
-        else:
-            local_path = args.object_path
+        local_path = args.object_path
         save_images(local_path)
         end_i = time.time()
         print("Finished", local_path, "in", end_i - start_i, "seconds")
-        if args.object_path.startswith("http"):
-            os.remove(local_path)
     except Exception as e:
         print("Failed to render", args.object_path)
         print(e)
