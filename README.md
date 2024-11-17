@@ -29,7 +29,7 @@ cd OpenLRM
 ### Environment
 - Install requirements for OpenLRM first.
   ```
-  conda creative --name Openlrm  python=3.9.19 -y
+  conda create --name Openlrm  python=3.9 -y
   pip install -r requirements.txt
   ```
 - Please then follow the [xFormers installation guide](https://github.com/facebookresearch/xformers?tab=readme-ov-file#installing-xformers) to enable memory efficient attention inside [DINOv2 encoder](openlrm/models/encoders/dinov2/layers/attention.py).
