@@ -68,7 +68,7 @@ cd OpenLRM
 
 valid_paths.json fomerat:
 
-{  "good_objs": [    {      "pose_path": "object1"    },    {      "pose_path": "object2"    },    {      "pose_path": "object3"    }  ......  ] }
+{  "good_objs": [     "object1"    ,   "object2"   ,   "object3",    ......  ] }
 
 
 
